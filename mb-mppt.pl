@@ -263,9 +263,18 @@ sub getAlarms {
     		}
 	}
 
-	print "\nALARMS:\n\n";
-	check_number($$vs->[3], \@alarms);
-	check_number($$vs->[2], \@alarms);
+    #
+    # Alarms are more than 2 bytes.  If any of the 3rd byte has bits turned on
+    # need to scale it up by adding 2^16 to it.
+    #
+
+    print "\nALARMS:\n\n";
+    if($$vs->[2] == 0) {
+        check_number($$vs->[3], \@alarms);
+    }
+    else {
+        check_number($$vs->[3] + ($$vs->[2] + 65535), \@alarms);
+    }
 
 	print "\nFAULTS:\n\n";
 	check_number($$vs->[0], \@faults);
