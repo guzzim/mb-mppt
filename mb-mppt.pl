@@ -8,7 +8,7 @@ use Math::BigFloat;
 use Data::Dumper;
 
 my $client = Device::Modbus::TCP::Client->new(
-    host => '10.60.30.66',
+    host => '10.60.X.Y',
 );
  
 sub getSerial {
