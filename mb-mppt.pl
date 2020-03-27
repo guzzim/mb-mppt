@@ -8,7 +8,7 @@ use Math::BigFloat;
 use Data::Dumper;
 
 my $client = Device::Modbus::TCP::Client->new(
-    host => '10.60.X.Y',
+    host => '10.60.30.66',
 );
  
 sub getSerial {
@@ -111,6 +111,8 @@ sub getBatt {
 	my $sweep_vmp = sprintf("%.2f", unpack("s", pack("s", $$xs->[3])) * ($fractional_term + $V_PU_hi) * 2**(-15));
 	my $sweep_voc = sprintf("%.2f", unpack("s", pack("s", $$xs->[4])) * ($fractional_term + $V_PU_hi) * 2**(-15));
 
+	print "\nLive Data View:\n";
+	print "=======================================\n";
 	print "MPPT Output Power(W):.........$power_out_shadow\n";
 	print "MPPT Input Power(W):..........$power_in_shadow\n";
 	print "MPPT Max Power of Last Sweep:.$sweep_Pin_max\n";
@@ -190,6 +192,10 @@ sub getBatt {
 
 }
 
+#
+# Takes the integer alarm code and derives the active alarms, faults or flags
+# that are active.
+#
 sub procAlarms {
 
 	my $code = shift;
@@ -258,7 +264,7 @@ sub procAlarms {
     	my $bitmask = 1; # will keep incrementing it by *2 every time
     		for(my $i=0; $i < @{$array}; $i++) {
         		my $match = $bitmask & $number ? "ON" : "OFF"; # is the bit flipped on?
-        		print "$array->[$i]\n" if($match eq "ON");
+        		print " - $array->[$i]\n" if($match eq "ON");
         		#$bitmask *= 2; # or bit-shift - faster but less readable.
 				$bitmask = $bitmask << 1;
     		}
@@ -296,7 +302,7 @@ sub getAlarms {
     # need to scale it up by adding 2^16 to it.
     #
 
-    print "\nALARMS:\n\n";
+    print "\nALARMS:\n";
     if($$vs->[2] == 0) {
 		procAlarms($$vs->[3], 'alarms');
     }
@@ -362,17 +368,17 @@ sub getLogger {
 	my $whc_daily    = sprintf("%.2f", ($$vs->[4] * 1.0));
 	# Flags Daily
 	my $flags_daily  = $$vs->[5];
-	print "FLAGS DAILY:\n\n";
+	print "FLAGS DAILY:\n";
 	procAlarms($$vs->[5], 'flags');
 	# Max. Power Out(Watts), daily
 	my $multiplier = Math::BigFloat->new(2**(-17.135));
-	my $pout_max_daily = sprintf("%.2f", $$vs->[6] * ($fractional_term + $V_PU_hi) * ($I_fractional_term + $I_PU_hi) * $multiplier);
+	my $pout_max_daily = sprintf("%.0f", int($$vs->[6] * ($fractional_term + $V_PU_hi) * ($I_fractional_term + $I_PU_hi) * $multiplier));
 	# Min. battery temp. daily
 	my $tb_min_daily = unpack("c", pack("c", $$vs->[7]));
 	# Max. battery temp. daily
 	my $tb_max_daily = unpack("c", pack("c", $$vs->[8]));
 	# Fault Daily
-    print "\nFAULTS DAILY:\n\n";
+    print "\nFAULTS DAILY:\n";
 	procAlarms($$vs->[9], 'faults');
 	# $$vs->[10] is RESERVED - 2 bytes starting at 0x004A
 	# $$vs->[11] is alarm daily HI 0x004B
@@ -400,9 +406,10 @@ sub getLogger {
 	print "Cumulative time in Float:.......$time_fl_daily seconds\n";
 }
 
-getAlarms(\$client);
 #getSerial(\$client);
-#getBatt(\$client);
+getBatt(\$client);
+print "\n";
+getAlarms(\$client);
 print "\n";
 getLogger(\$client);
 
