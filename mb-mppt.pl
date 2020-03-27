@@ -4,10 +4,11 @@ use warnings;
 use strict;
 use Device::Modbus::TCP::Client;
 use Device::Modbus;
+use Math::BigFloat;
 use Data::Dumper;
 
 my $client = Device::Modbus::TCP::Client->new(
-    host => '10.60.X.Y',
+    host => '10.60.30.66',
 );
  
 sub getSerial {
@@ -42,6 +43,7 @@ sub getSerial {
 	
 	my $new_vs = join("", map { chr($_) } @d);
 	print "Serial No: $new_vs\n";
+	
 
 }
 
@@ -188,20 +190,11 @@ sub getBatt {
 
 }
 
-sub getAlarms {
-	
-	my $c = shift @_;
-	my $req = $$c->read_holding_registers(
-    	unit     => 1,
-   		address  => 0x002C,
-    	quantity => 4
-	);
+sub procAlarms {
 
-	$$c->send_request($req) || die "Send error: $!";
-	
-	my $response = $$c->receive_response;
-	my $vs = \$response->{'message'}->{'values'};
-	
+	my $code = shift;
+	my $alrm = shift;
+
 	# Compare decimal value from Modbus Client to Hex encoded representation
 	# of the bit (e.g. 2^7 = 128Decimal = 80Hex)
 
@@ -251,17 +244,52 @@ sub getAlarms {
 			"FAULT 16                     "  # Bit 15
 	);
 
+	my @flags = (
+			"RESET DETECTED",				 # Bit  0
+			"EQUALISE TRIGGERED",			 # Bit  1
+			"ENTERED FLOAT",				 # Bit  2
+			"ALARM OCCURRED",				 # Bit  3
+			"FAULT OCCURRED"				 # Bit  4
+	);
+
 	sub check_number {
     	my $number = shift;
 		my $array = shift;
     	my $bitmask = 1; # will keep incrementing it by *2 every time
     		for(my $i=0; $i < @{$array}; $i++) {
-        		my $match = $bitmask & $number ? "ON " : "OFF"; # is the bit flipped on?
-        		print "|$match| $array->[$i] | \n";
+        		my $match = $bitmask & $number ? "ON" : "OFF"; # is the bit flipped on?
+        		print "$array->[$i]\n" if($match eq "ON");
         		#$bitmask *= 2; # or bit-shift - faster but less readable.
 				$bitmask = $bitmask << 1;
     		}
 	}
+
+	if($alrm eq 'alarms') {
+		check_number($code, \@alarms);
+	}
+	elsif($alrm eq 'faults') {
+		check_number($code, \@faults);
+	}
+	elsif($alrm eq 'flags') {
+		check_number($code, \@flags);
+	}
+
+}
+
+sub getAlarms {
+	
+	my $c = shift @_;
+	my $req = $$c->read_holding_registers(
+    	unit     => 1,
+   		address  => 0x002C,
+    	quantity => 4
+	);
+
+	$$c->send_request($req) || die "Send error: $!";
+	
+	my $response = $$c->receive_response;
+	my $vs = \$response->{'message'}->{'values'};
+	
 
     #
     # Alarms are more than 2 bytes.  If any of the 3rd byte has bits turned on
@@ -270,14 +298,14 @@ sub getAlarms {
 
     print "\nALARMS:\n\n";
     if($$vs->[2] == 0) {
-        check_number($$vs->[3], \@alarms);
+		procAlarms($$vs->[3], 'alarms');
     }
     else {
-        check_number($$vs->[3] + ($$vs->[2] + 65535), \@alarms);
+		procAlarms($$vs->[3] + ($$vs->[2] + 65535), 'alarms');
     }
 
-	print "\nFAULTS:\n\n";
-	check_number($$vs->[0], \@faults);
+	#print "\nFAULTS:\n\n";
+	#procAlarms($$vs->[0], 'faults');
 
 	
 }
@@ -285,6 +313,29 @@ sub getAlarms {
 sub getLogger {
 	
 	my $c = shift @_;
+	
+	##
+	# Collect the Voltage/Current Scaling values
+	##
+	my $reqX = $$c->read_holding_registers(
+    	unit     => 1,
+   		address  => 0x0000,
+    	quantity => 4
+	);
+
+	$$c->send_request($reqX) || die "Send error: $!";
+	my $responseX = $$c->receive_response;
+	my $V_PU_hi = int($responseX->{'message'}->{'values'}->[0]);
+	my $V_PU_lo = int($responseX->{'message'}->{'values'}->[1]);
+	my $I_PU_hi = int($responseX->{'message'}->{'values'}->[2]);
+	my $I_PU_lo = int($responseX->{'message'}->{'values'}->[3]);
+
+	my $fractional_term = Math::BigFloat->new($V_PU_lo / (2**16));
+	my $I_fractional_term = Math::BigFloat->new($I_PU_lo / (2**16));
+	
+	##
+	# Collect Today's "Logger" Values
+	##
 	my $req = $$c->read_holding_registers(
     	unit     => 1,
    		address  => 0x0040,
@@ -299,14 +350,61 @@ sub getLogger {
 	my @d;
 	my $count = 0;
 	
-	print Dumper $$vs;
+	# Min. daily battery voltage
+	my $vb_min_daily = sprintf("%.2f", unpack("s", pack("s", $$vs->[0])) * ($fractional_term + $V_PU_hi) * 2**(-15));
+	# Max. daily battery volate
+	my $vb_max_daily = sprintf("%.2f", unpack("s", pack("s", $$vs->[1])) * ($fractional_term + $V_PU_hi) * 2**(-15));
+	# Max. daily input voltage
+	my $va_max_daily = sprintf("%.2f", unpack("s", pack("s", $$vs->[2])) * ($fractional_term + $V_PU_hi) * 2**(-15));
+	# Total Ah charge daily
+	my $ahc_daily    = sprintf("%.2f", ($$vs->[3] * 0.1));
+	# Total Wh charge daily
+	my $whc_daily    = sprintf("%.2f", ($$vs->[4] * 1.0));
+	# Flags Daily
+	my $flags_daily  = $$vs->[5];
+	print "FLAGS DAILY:\n\n";
+	procAlarms($$vs->[5], 'flags');
+	# Max. Power Out(Watts), daily
+	my $multiplier = Math::BigFloat->new(2**(-17.135));
+	my $pout_max_daily = sprintf("%.2f", $$vs->[6] * ($fractional_term + $V_PU_hi) * ($I_fractional_term + $I_PU_hi) * $multiplier);
+	# Min. battery temp. daily
+	my $tb_min_daily = unpack("c", pack("c", $$vs->[7]));
+	# Max. battery temp. daily
+	my $tb_max_daily = unpack("c", pack("c", $$vs->[8]));
+	# Fault Daily
+    print "\nFAULTS DAILY:\n\n";
+	procAlarms($$vs->[9], 'faults');
+	# $$vs->[10] is RESERVED - 2 bytes starting at 0x004A
+	# $$vs->[11] is alarm daily HI 0x004B
+	# $$vs->[12] is alarm daily LO 0x004C
+	# Cumulative time in absorption, daily (in seconds)
+	my $time_ab_daily = int($$vs->[13]);
+	# Cumulative time in equalize, daily (in seconds)
+	my $time_eq_daily = int($$vs->[14]);
+	# Cumulative time in float, daily (in seconds)
+	my $time_fl_daily = int($$vs->[15]);
+	# Registers 0x0050 through to 0x0057 are RESERVED
 
+	print "\nDaily total:\n";
+	print "=======================================\n";
+	print "Min. Daily Batt Voltage(v):.....$vb_min_daily\n";
+	print "Max. Daily Batt Voltage(V):.....$vb_max_daily\n";
+	print "Max. Daily Input Voltage(V):....$va_max_daily\n";
+	print "Total Ah charge daily(Ah):......$ahc_daily\n";
+	print "Total Wh charge daily(Ah):......$whc_daily\n";
+	print "Max. Power Out daily(W):........$pout_max_daily\n";
+	print "Min. Battery Temp daily(C):.....$tb_min_daily\n";
+	print "Max. Battery Temp daily(C):.....$tb_max_daily\n";
+	print "Cumulative time in Absorb:......$time_ab_daily seconds\n";
+	print "Cumulative time in Equalize:....$time_eq_daily seconds\n";
+	print "Cumulative time in Float:.......$time_fl_daily seconds\n";
 }
 
 getAlarms(\$client);
-getSerial(\$client);
-getBatt(\$client);
-#getLogger(\$client);
+#getSerial(\$client);
+#getBatt(\$client);
+print "\n";
+getLogger(\$client);
 
 $client->disconnect;
 
