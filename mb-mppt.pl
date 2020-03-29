@@ -5,12 +5,52 @@ use strict;
 use Device::Modbus::TCP::Client;
 use Device::Modbus;
 use Math::BigFloat;
-use Data::Dumper;
+
+my $HOST = $ARGV[0];
+my $data;
 
 my $client = Device::Modbus::TCP::Client->new(
-    host => '10.60.X.Y',
+    host => $HOST,
 );
- 
+
+sub getDIPSw {
+	
+	my $c = shift @_;
+
+	my $req = $$c->read_holding_registers(
+		unit     => 1,
+		address  => 0x0030,
+		quantity => 1
+	);
+
+	$$c->send_request($req) || die "Send error: $!";
+	my $response = $$c->receive_response;
+
+	my $xs = \$response->values;
+
+	print "DIP Switch Positions:\n";
+
+	my @dipSw = (
+		"SW1 Reserved.      ",
+		"SW2 Voltage Select ",
+		"SW3 Voltage Select ",
+		"SW4 Batt. Mode     ",
+		"SW5 Batt. Mode     ",
+		"SW6 Batt. Mode     ",
+		"SW7 Batt. Equalise ",
+		"SW8 Ethernet Sec.  "
+	);
+
+	my $bitmask = 1; # will keep incrementing it by *2 every time
+		for(my $i=0; $i < @dipSw; $i++) {
+			my $match = $bitmask & $$xs->[0] ? "ON" : "OFF"; # is the bit flipped on?
+			print " - $dipSw[$i]\t$match\n";
+			#$bitmask *= 2; # or bit-shift - faster but less readable.
+			$bitmask = $bitmask << 1;
+		}
+
+}
+
 sub getSerial {
 	
 	my $c = shift @_;
@@ -119,6 +159,12 @@ sub getBatt {
 	print "MPPT Sweep Vmp:...............$sweep_vmp\n";
 	print "MPPT Sweep Voc:...............$sweep_voc\n";
 
+	$data->{'mppt_output_pwr'} 		= $power_out_shadow;
+	$data->{'mppt_input_pwr'} 		= $power_in_shadow;
+	$data->{'mppt_max_pwr_lastswp'} = $sweep_Pin_max;
+	$data->{'mppt_sweep_vmp'} 		= $sweep_vmp;
+	$data->{'mppt_sweep_voc'} 		= $sweep_voc;
+
 	##
 	# Collect Charger Values
 	##
@@ -149,6 +195,8 @@ sub getBatt {
 	print "Charge State:.................".$chargeState[$$xc->[0]]."\n";
 	print "Target Voltage(V):............$vb_ref\n";
 	
+	$data->{'charge_state'} = $$xc->[0];
+
 	#
 	# Using pack/unpack to take decimal value from ModBus::Client
 	# and convert into 2 byte scalar as a 'signed' 16 bytes (e.g. 0xFF really means -32767, not 65535).
@@ -176,7 +224,7 @@ sub getBatt {
 	print "Battery Terminal Voltage(V):..$adc_vbterm_f\n";
 	print "PV Terminal Voltage(V):.......$adc_va_f\n";
 	print "Battery Current(A):...........$adc_ib_f_shadow\n";
-	print "PV Current(A):................$adc_ib_f_shadow\n";
+	print "PV Current(A):................$adc_ia_f_shadow\n";
 	print "12V Supply:...................$adc_p12_f\n";
 	print "MeterBus Supply:..............$adc_pmeter_f\n";
 	print "3V Supply:....................$adc_p3_f\n";
@@ -189,6 +237,12 @@ sub getBatt {
 	print "Battery Voltage 1minute:......$adc_vb_f_1m\n";
 	print "Charge Current 1minute:.......$adc_ib_f_1m\n";
 
+	$data->{'batt_reg_volts'}  = $adc_vb_f_med;
+	$data->{'batt_term_volts'} = $adc_vbterm_f;
+	$data->{'batt_current'}    = $adc_ib_f_shadow;
+	$data->{'pv_current'}      = $adc_ia_f_shadow;
+	$data->{'pv_term_volts'}   = $adc_va_f;
+	$data->{'heatsink_temp'}   = $T_hs;
 
 }
 
@@ -371,7 +425,9 @@ sub getLogger {
 	print "FLAGS DAILY:\n";
 	procAlarms($$vs->[5], 'flags');
 	# Max. Power Out(Watts), daily
-	my $multiplier = Math::BigFloat->new(2**(-17.135));
+	# Charge controller built-in webserver seems to take pout_max_daily and divide it by 10.
+	# Manual says we should apply the scaling of V_PU * I_PU * 2^(-17)
+	my $multiplier = Math::BigFloat->new(2**(-17));
 	my $pout_max_daily = sprintf("%.0f", int($$vs->[6] * ($fractional_term + $V_PU_hi) * ($I_fractional_term + $I_PU_hi) * $multiplier));
 	# Min. battery temp. daily
 	my $tb_min_daily = unpack("c", pack("c", $$vs->[7]));
@@ -406,12 +462,39 @@ sub getLogger {
 	print "Cumulative time in Float:.......$time_fl_daily seconds\n";
 }
 
+sub send2Influx {
+
+	my $data = shift;
+	my $line;
+
+$line =         "mppt_stats,host=$HOST,mppt_output_pwr value=" .      $$data->{'mppt_output_pwr'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,mppt_input_pwr value=" .       $$data->{'mppt_input_pwr'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,mppt_max_pwr_lastswp value=" . $$data->{'mppt_max_pwr_lastswp'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,mppt_sweep_vmp value=" .       $$data->{'mppt_sweep_vmp'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,mppt_sweep_voc value=" .       $$data->{'mppt_sweep_voc'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,charge_state value=" .         $$data->{'charge_state'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,batt_reg_volts value=" .       $$data->{'batt_reg_volts'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,batt_term_volts value=" .      $$data->{'batt_term_volts'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,pv_term_volts value=" .        $$data->{'pv_term_volts'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,batt_current value=" .         $$data->{'batt_current'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,pv_current value=" .           $$data->{'pv_current'} . "\n";
+$line = $line . "mppt_stats,host=$HOST,heatsink_temp value=" .        $$data->{'heatsink_temp'} . "\n";
+
+print $line;
+
+#`curl -i -XPOST 'http://localhost:8086/write?db=mppt_stats' --data-binary "$line"`;
+
+}
+
 #getSerial(\$client);
 getBatt(\$client);
-print "\n";
+#print "\n";
 getAlarms(\$client);
 print "\n";
 getLogger(\$client);
+print "\n";
+#getDIPSw(\$client);
+#send2Influx(\$data);
 
 $client->disconnect;
 
