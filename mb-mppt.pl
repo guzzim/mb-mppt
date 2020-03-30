@@ -425,10 +425,9 @@ sub getLogger {
 	print "FLAGS DAILY:\n";
 	procAlarms($$vs->[5], 'flags');
 	# Max. Power Out(Watts), daily
-	# Charge controller built-in webserver seems to take pout_max_daily and divide it by 10.
-	# Manual says we should apply the scaling of V_PU * I_PU * 2^(-17)
-	my $multiplier = Math::BigFloat->new(2**(-17));
-	my $pout_max_daily = sprintf("%.0f", int($$vs->[6] * ($fractional_term + $V_PU_hi) * ($I_fractional_term + $I_PU_hi) * $multiplier));
+	# pout_max_daily and divide it by 10 - confirmed by MorningStar tech support.
+	# Manual says we should apply the scaling of V_PU * I_PU * 2^(-17) <- this is incorrect.
+	my $pout_max_daily = sprintf("%.2f", int($$vs->[6]) * 0.1);
 	# Min. battery temp. daily
 	my $tb_min_daily = unpack("c", pack("c", $$vs->[7]));
 	# Max. battery temp. daily
